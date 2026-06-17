@@ -1,14 +1,14 @@
 """
 MERCENARY - Relay Server
-Handles both WebSocket connections and HTTP health checks for Render.
+Compatible with websockets 12+ and Python 3.14
 """
 import asyncio
 import json
 import random
 import string
 import os
-from http import HTTPStatus
 import websockets
+from websockets.asyncio.server import serve
 
 rooms = {}
 
@@ -17,11 +17,6 @@ def make_code():
         code = ''.join(random.choices(string.digits, k=4))
         if code not in rooms:
             return code
-
-async def health_check(path, request_headers):
-    """Handle HTTP GET/HEAD requests from Render's health checker."""
-    if request_headers.get("Upgrade", "").lower() != "websocket":
-        return HTTPStatus.OK, [("Content-Type", "text/plain")], b"OK"
 
 async def handler(ws):
     room_code = None
@@ -36,7 +31,7 @@ async def handler(ws):
                 rooms[room_code] = {"host": ws, "guest": None}
                 role = "host"
                 await ws.send(json.dumps({"action": "room_created", "code": room_code}))
-                print(f"[+] Room {room_code} created")
+                print(f"[+] Room {room_code} created", flush=True)
 
             elif action == "join":
                 room_code = msg.get("code")
@@ -50,7 +45,7 @@ async def handler(ws):
                     await ws.send(json.dumps({"action": "joined", "code": room_code}))
                     host_ws = rooms[room_code]["host"]
                     await host_ws.send(json.dumps({"action": "guest_joined"}))
-                    print(f"[+] Guest joined room {room_code}")
+                    print(f"[+] Guest joined room {room_code}", flush=True)
 
             elif action == "state":
                 if room_code and room_code in rooms:
@@ -62,6 +57,8 @@ async def handler(ws):
 
     except websockets.exceptions.ConnectionClosed:
         pass
+    except Exception as e:
+        print(f"[!] Handler error: {e}", flush=True)
     finally:
         if room_code and room_code in rooms:
             if role == "host":
@@ -72,21 +69,22 @@ async def handler(ws):
                     except:
                         pass
                 del rooms[room_code]
-                print(f"[-] Room {room_code} closed")
+                print(f"[-] Room {room_code} closed", flush=True)
             elif role == "guest":
-                rooms[room_code]["guest"] = None
-                host_ws = rooms[room_code].get("host")
-                if host_ws:
-                    try:
-                        await host_ws.send(json.dumps({"action": "opponent_left"}))
-                    except:
-                        pass
+                if room_code in rooms:
+                    rooms[room_code]["guest"] = None
+                    host_ws = rooms[room_code].get("host")
+                    if host_ws:
+                        try:
+                            await host_ws.send(json.dumps({"action": "opponent_left"}))
+                        except:
+                            pass
 
 async def main():
     port = int(os.environ.get("PORT", 8765))
-    print(f"Relay server running on port {port}")
-    async with websockets.serve(handler, "0.0.0.0", port,
-                                process_request=health_check):
+    print(f"Relay server starting on port {port}", flush=True)
+    async with serve(handler, "0.0.0.0", port) as server:
+        print(f"Relay server ready!", flush=True)
         await asyncio.Future()
 
 if __name__ == "__main__":
