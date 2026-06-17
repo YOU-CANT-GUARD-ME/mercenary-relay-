@@ -1,21 +1,27 @@
 """
 MERCENARY - Relay Server
-Run this on any public server (Railway, Render, VPS, etc.)
-Players connect to this to find each other.
+Handles both WebSocket connections and HTTP health checks for Render.
 """
 import asyncio
 import json
 import random
 import string
+import os
+from http import HTTPStatus
 import websockets
 
-rooms = {}  # room_code -> {host: ws, guest: ws}
+rooms = {}
 
 def make_code():
     while True:
         code = ''.join(random.choices(string.digits, k=4))
         if code not in rooms:
             return code
+
+async def health_check(path, request_headers):
+    """Handle HTTP GET/HEAD requests from Render's health checker."""
+    if request_headers.get("Upgrade", "").lower() != "websocket":
+        return HTTPStatus.OK, [("Content-Type", "text/plain")], b"OK"
 
 async def handler(ws):
     room_code = None
@@ -25,7 +31,6 @@ async def handler(ws):
             msg = json.loads(raw)
             action = msg.get("action")
 
-            # ── HOST creates a room ──────────────────────────────────────────
             if action == "host":
                 room_code = make_code()
                 rooms[room_code] = {"host": ws, "guest": None}
@@ -33,7 +38,6 @@ async def handler(ws):
                 await ws.send(json.dumps({"action": "room_created", "code": room_code}))
                 print(f"[+] Room {room_code} created")
 
-            # ── GUEST joins a room ───────────────────────────────────────────
             elif action == "join":
                 room_code = msg.get("code")
                 if room_code not in rooms:
@@ -44,16 +48,13 @@ async def handler(ws):
                     rooms[room_code]["guest"] = ws
                     role = "guest"
                     await ws.send(json.dumps({"action": "joined", "code": room_code}))
-                    # Tell host that guest connected
                     host_ws = rooms[room_code]["host"]
                     await host_ws.send(json.dumps({"action": "guest_joined"}))
                     print(f"[+] Guest joined room {room_code}")
 
-            # ── GAME STATE relay ─────────────────────────────────────────────
             elif action == "state":
                 if room_code and room_code in rooms:
                     room = rooms[room_code]
-                    # Forward to the other player
                     if role == "host" and room["guest"]:
                         await room["guest"].send(raw)
                     elif role == "guest" and room["host"]:
@@ -62,10 +63,8 @@ async def handler(ws):
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
-        # Clean up room
         if room_code and room_code in rooms:
             if role == "host":
-                # Notify guest if present
                 room = rooms[room_code]
                 if room.get("guest"):
                     try:
@@ -84,10 +83,11 @@ async def handler(ws):
                         pass
 
 async def main():
-    port = 8765
+    port = int(os.environ.get("PORT", 8765))
     print(f"Relay server running on port {port}")
-    async with websockets.serve(handler, "0.0.0.0", port):
-        await asyncio.Future()  # run forever
+    async with websockets.serve(handler, "0.0.0.0", port,
+                                process_request=health_check):
+        await asyncio.Future()
 
 if __name__ == "__main__":
     asyncio.run(main())
